@@ -23,6 +23,8 @@ The default output is `input-fixed.jar`. Existing output files are never replace
 
 `--strip-generics` removes `Signature` attributes from classes, fields and methods. It can repair malformed generic metadata that breaks reflection or decompilers, but removes generic type information exposed through reflection. Runtime descriptors and instructions are retained. This flag does not remove JAR signing files.
 
+`--trim-trailing` removes bytes after the final class attribute, which can cause JVM `Extra bytes at the end of class file` errors. The complete class structure must be readable; truncated fields, methods or attributes still fail. Existing metadata is retained unless a stripping flag is also supplied.
+
 `java -jar build/ClassFixer.jar --args-file arguments.txt` reads UTF-8 arguments with one argument per line, without quotes. Paths are relative to the current working directory. This also supports paths that the Windows Java 17 launcher cannot pass directly through the active system code page. The argument-file path itself must be representable by that launcher.
 
 Archive contents are streamed with limits of 256 MiB per entry, 1 GiB total and 100,000 entries. Entry contents, compression methods, timestamps and comments are retained; ZIP extra fields and filesystem permission bits are not retained.
