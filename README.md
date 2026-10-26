@@ -1,6 +1,6 @@
 # ClassFixer
 
-Repair JAR entries that hide class files behind trailing slashes, such as `Example.class/`. Class bytes and resource contents are preserved. This tool does not decrypt strings or undo control-flow obfuscation.
+Repair JAR entries that hide class files behind trailing slashes, such as `Example.class/`. Default repair preserves class bytes and resource contents. Optional modes recover declared class paths and remove debug metadata. This tool does not decrypt strings or undo control-flow obfuscation.
 
 Requires JDK 17 or newer and Python 3.9 or newer to build. The generated JAR only needs Java 17 or newer.
 
