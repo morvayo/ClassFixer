@@ -24,11 +24,25 @@ public final class Main {
     private static final int MAX_ENTRIES = 100_000;
 
     public static void main(String[] args) {
+        if (args.length == 2 && args[0].equals("--args-file")) {
+            try {
+                Path arguments = Path.of(args[1]);
+                if (Files.size(arguments) > 1024 * 1024) {
+                    throw new IOException("argument file exceeds 1 mib limit");
+                }
+                args = Files.readAllLines(arguments).toArray(String[]::new);
+            } catch (IOException | IllegalArgumentException exception) {
+                System.err.println("arguments -> failed: " + exception.getMessage());
+                System.exit(1);
+            }
+        }
         if (args.length == 1 && args[0].equals("--help")) {
             System.out.println("usage: java -jar ClassFixer.jar [--recover-names] input.jar [output.jar]");
             System.out.println("repairs class entries hidden by trailing slashes; existing outputs are not replaced");
             System.out.println("--recover-names -> recover paths from class headers, including disguised resource entries");
             System.out.println("--dry-run -> validate the archive and preview renames without writing output");
+
+            System.out.println("--args-file file.txt -> read one argument per line as utf-8");
             return;
         }
         List<String> paths = new ArrayList<>();

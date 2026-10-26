@@ -18,6 +18,8 @@ The default output is `input-fixed.jar`. Existing output files are never replace
 
 `--dry-run` prints planned renames and validates the complete archive, including CRCs, without creating an output or temporary file. It can inspect a repair even if the chosen output path already exists. Signature checks and size limits still apply.
 
+`java -jar build/ClassFixer.jar --args-file arguments.txt` reads UTF-8 arguments with one argument per line, without quotes. Paths are relative to the current working directory. This also supports paths that the Windows Java 17 launcher cannot pass directly through the active system code page. The argument-file path itself must be representable by that launcher.
+
 Archive contents are streamed with limits of 256 MiB per entry, 1 GiB total and 100,000 entries. Entry contents, compression methods, timestamps and comments are retained; ZIP extra fields and filesystem permission bits are not retained.
 
 The implementation is independent of [apkreader/ClassFixer](https://github.com/apkreader/ClassFixer), which inspired the archive-entry repair use case.
