@@ -40,6 +40,16 @@ class ClassFixerTests(unittest.TestCase):
             check=True, capture_output=True,
         )
         cls.packaged = (cls.fixture / "demo" / "Packaged.class").read_bytes()
+        generic = cls.fixture / "GenericFixture.java"
+        generic.write_text(
+            'public class GenericFixture<T> { public java.util.List<T> values; '
+            'public T value(T input) { return input; } '
+            'public static void main(String[] args) { '
+            'System.out.println("parameters -> " + GenericFixture.class.getTypeParameters().length); } }',
+            encoding="utf-8",
+        )
+        subprocess.run(["javac", "--release", "17", "-g", str(generic)], check=True, capture_output=True)
+        cls.generic = (cls.fixture / "GenericFixture.class").read_bytes()
 
     @classmethod
     def tearDownClass(cls):
@@ -393,6 +403,42 @@ class ClassFixerTests(unittest.TestCase):
                 self.assertNotIn("Exception in thread", result.stderr)
                 self.assertFalse(self.output.exists())
                 self.assertEqual(list(self.folder.glob(".classfixer-*")), [])
+
+    def test_generic_stripping_repairs_reflection(self):
+        signature = b"<T:Ljava/lang/Object;>Ljava/lang/Object;"
+        self.assertIn(signature, self.generic)
+        damaged = self.generic.replace(signature, b"!" + signature[1:])
+        self.write_archive([("GenericFixture.class", damaged)])
+        before = subprocess.run(
+            ["java", "-cp", str(self.input), "GenericFixture"], capture_output=True, text=True, timeout=20
+        )
+        self.assertNotEqual(before.returncode, 0)
+        self.assertIn("GenericSignatureFormatError", before.stderr)
+        result = self.run_cli("--strip-generics", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = subprocess.run(
+            ["java", "-verify", "-cp", str(self.output), "GenericFixture"],
+            capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(after.returncode, 0, after.stderr)
+        self.assertIn("parameters -> 0", after.stdout)
+        inspection = subprocess.run(
+            ["javap", "-v", "-classpath", str(self.output), "GenericFixture"],
+            capture_output=True, text=True, timeout=20,
+        )
+        self.assertNotIn("Signature:", inspection.stdout)
+        self.assertIn("LineNumberTable:", inspection.stdout)
+
+    def test_generic_stripping_combines_with_debug_stripping(self):
+        self.write_archive([("GenericFixture.class/", self.generic)])
+        result = self.run_cli("--strip-debug", "--strip-generics", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        inspection = subprocess.run(
+            ["javap", "-v", "-classpath", str(self.output), "GenericFixture"],
+            capture_output=True, text=True, timeout=20,
+        )
+        self.assertNotIn("Signature:", inspection.stdout)
+        self.assertNotIn("LineNumberTable:", inspection.stdout)
 
 
 if __name__ == "__main__":
