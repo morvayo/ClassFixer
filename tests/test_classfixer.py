@@ -153,7 +153,8 @@ class ClassFixerTests(unittest.TestCase):
         self.write_archive([("Example.class/", self.bytecode)])
         self.input = self.input.rename(self.folder / "sample \u00f6 file.jar")
         self.output = self.folder / "repaired \u015f file.jar"
-        self.assertEqual(self.fix().returncode, 0)
+        result = self.fix()
+        self.assertEqual(result.returncode, 0, result.stderr)
         with zipfile.ZipFile(self.output) as archive:
             self.assertEqual(archive.read("Example.class"), self.bytecode)
 
