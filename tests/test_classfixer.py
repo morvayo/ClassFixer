@@ -153,7 +153,9 @@ class ClassFixerTests(unittest.TestCase):
         self.write_archive([("Example.class/", self.bytecode)])
         self.input = self.input.rename(self.folder / "sample \u00f6 file.jar")
         self.output = self.folder / "repaired \u015f file.jar"
-        result = self.fix()
+        arguments = self.folder / "arguments.txt"
+        arguments.write_text(str(self.input) + "\n" + str(self.output) + "\n", encoding="utf-8")
+        result = self.run_cli("--args-file", arguments)
         self.assertEqual(result.returncode, 0, result.stderr)
         with zipfile.ZipFile(self.output) as archive:
             self.assertEqual(archive.read("Example.class"), self.bytecode)
@@ -195,6 +197,12 @@ class ClassFixerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage:", result.stdout)
         self.assertEqual(result.stderr, "")
+
+    def test_argument_file_missing_and_oversized(self):
+        arguments = self.folder / "arguments.txt"
+        self.assertEqual(self.run_cli("--args-file", arguments).returncode, 1)
+        arguments.write_bytes(b"a" * (1024 * 1024 + 1))
+        self.assertIn("exceeds 1 mib", self.run_cli("--args-file", arguments).stderr)
 
 
 if __name__ == "__main__":
