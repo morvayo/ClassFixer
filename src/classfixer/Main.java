@@ -41,7 +41,7 @@ public final class Main {
             }
         }
         if (args.length == 1 && args[0].equals("--help")) {
-            System.out.println("usage: java -jar ClassFixer.jar [--recover-names] input.jar [output.jar]");
+            System.out.println("usage: java -jar ClassFixer.jar [options] input.jar|input.class [output]");
             System.out.println("repairs class entries hidden by trailing slashes; existing outputs are not replaced");
             System.out.println("--recover-names -> recover paths from class headers, including disguised resource entries");
             System.out.println("--dry-run -> validate the archive and preview renames without writing output");
@@ -95,8 +95,22 @@ public final class Main {
             if (!Files.isRegularFile(input)) {
                 throw new IOException("input is not a regular file");
             }
-            Path output = (paths.size() == 2 ? Path.of(paths.get(1)) : defaultOutput(input)).toAbsolutePath().normalize();
-            int repaired = fix(input, output, recoverNames, dryRun, removedAttributes, trimTrailing, normalizePaths, unsigned);
+            boolean standalone;
+            try (InputStream data = Files.newInputStream(input)) {
+                standalone = Arrays.equals(data.readNBytes(4), CLASS_MAGIC)
+                        || input.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".class");
+            }
+            Path output = (paths.size() == 2 ? Path.of(paths.get(1)) : defaultOutput(input, standalone)).toAbsolutePath().normalize();
+            int repaired;
+            if (standalone) {
+                if (normalizePaths || unsigned) {
+                    throw new IllegalArgumentException("archive-only options require jar input");
+                }
+                fixClass(input, output, dryRun, removedAttributes, trimTrailing);
+                repaired = 0;
+            } else {
+                repaired = fix(input, output, recoverNames, dryRun, removedAttributes, trimTrailing, normalizePaths, unsigned);
+            }
             System.out.println("repaired entries -> " + repaired);
             System.out.println("output -> " + (dryRun ? "not written (dry-run)" : output));
         } catch (IOException | IllegalArgumentException | SecurityException exception) {
@@ -105,12 +119,38 @@ public final class Main {
         }
     }
 
-    private static Path defaultOutput(Path input) {
+    private static Path defaultOutput(Path input, boolean standalone) {
         String name = input.getFileName().toString();
-        if (name.toLowerCase(Locale.ROOT).endsWith(".jar")) {
-            name = name.substring(0, name.length() - 4);
+        String extension = standalone ? ".class" : ".jar";
+        if (name.toLowerCase(Locale.ROOT).endsWith(extension)) {
+            name = name.substring(0, name.length() - extension.length());
         }
-        return input.resolveSibling(name + "-fixed.jar");
+        return input.resolveSibling(name + "-fixed" + extension);
+    }
+
+    private static void fixClass(Path input, Path output, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing) throws IOException {
+        if (!dryRun && (input.equals(output) || Files.exists(output, LinkOption.NOFOLLOW_LINKS))) {
+            throw new IOException("output already exists or matches input");
+        }
+        byte[] original;
+        try (InputStream data = Files.newInputStream(input)) {
+            original = ClassFile.read(data);
+        }
+        ClassFile classFile = new ClassFile(original);
+        byte[] transformed = removedAttributes.isEmpty() && !trimTrailing
+                ? original : classFile.rewrite(removedAttributes, trimTrailing);
+        if (!dryRun) {
+            Path temporary = Files.createTempFile(output.getParent(), ".classfixer-", ".tmp");
+            try {
+                Files.write(temporary, transformed);
+                Files.move(temporary, output);
+            } finally {
+                Files.deleteIfExists(temporary);
+            }
+        }
+        System.out.println("declared class -> " + printable(classFile.name()));
+        System.out.println("checked entries -> 1");
+        System.out.println("rewritten classes -> " + (Arrays.equals(original, transformed) ? 0 : 1));
     }
 
     static int fix(Path input, Path output, boolean recoverNames, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing, boolean normalizePaths, boolean unsigned) throws IOException {

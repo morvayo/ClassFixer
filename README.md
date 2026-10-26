@@ -11,9 +11,12 @@ java -jar build/ClassFixer.jar input.jar output.jar
 java -jar build/ClassFixer.jar --recover-names input.jar
 java -jar build/ClassFixer.jar --dry-run --recover-names input.jar
 java -jar build/ClassFixer.jar --strip-debug --recover-names input.jar
+java -jar build/ClassFixer.jar --trim-trailing damaged.class Example.class
 ```
 
 The default output is `input-fixed.jar`. Existing output files are never replaced. Name collisions, CRC failures and oversized archives are rejected. Renaming entries in signed JARs is rejected because it would invalidate their signatures.
+
+Standalone `.class` files are supported with the same metadata and trailing-data repair flags. Their default output ends in `-fixed.class`; an explicit output filename can be used when loading the repaired class on the JVM. Standalone name recovery reports the declared name without creating package directories. Archive-only flags `--unsigned` and `--normalize-paths` are rejected for standalone inputs.
 
 `--recover-names` reads `this_class` from class-file headers and restores the declared package and class name, even when an entry has a different extension. Version prefixes in multi-release JARs are retained. Unsafe class names and malformed constant pools are rejected. Parsing is limited to 16 MiB per class; this checks headers, not JVM bytecode validity.
 
