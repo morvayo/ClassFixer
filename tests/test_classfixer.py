@@ -65,7 +65,10 @@ class ClassFixerTests(unittest.TestCase):
     def write_archive(self, entries, compression=zipfile.ZIP_DEFLATED):
         with zipfile.ZipFile(self.input, "w", compression=compression) as archive:
             for name, payload in entries:
-                archive.writestr(name, payload)
+                info = zipfile.ZipInfo(name)
+                info.filename = name
+                info.compress_type = compression
+                archive.writestr(info, payload)
 
     def run_cli(self, *args):
         return subprocess.run(
@@ -467,6 +470,35 @@ class ClassFixerTests(unittest.TestCase):
     def test_trimming_rejects_truncated_class(self):
         self.write_archive([("Example.class", self.bytecode[:-1])])
         self.assert_rejected(self.run_cli("--trim-trailing", self.input, self.output), "truncated class attribute")
+
+    def test_path_normalization_preserves_resources(self):
+        self.write_archive([
+            (".\\demo\\Packaged.class\\", self.packaged),
+            ("./assets//text.txt", b"resource"), ("folder\\", b""),
+        ])
+        result = self.run_cli("--normalize-paths", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertEqual(archive.namelist(), ["demo/Packaged.class", "assets/text.txt", "folder/"])
+            self.assertEqual(archive.read("assets/text.txt"), b"resource")
+            self.assertEqual(archive.read("demo/Packaged.class"), self.packaged)
+
+    def test_path_normalization_rejects_traversal_and_absolute_names(self):
+        for name in ("../data", "folder/../data", "/absolute", "C:\\data", "\\\\server\\data", "file:stream"):
+            with self.subTest(name=name):
+                self.write_archive([(name, b"resource")])
+                self.assert_rejected(self.run_cli("--normalize-paths", self.input, self.output), "unsafe archive path")
+
+    def test_normalized_path_collisions_rejected(self):
+        self.write_archive([("a\\b.txt", b"first"), ("a/b.txt", b"second")])
+        self.assert_rejected(self.run_cli("--normalize-paths", self.input, self.output), "duplicate output entry")
+
+    def test_path_normalization_combines_with_multi_release_recovery(self):
+        self.write_archive([("META-INF\\versions\\17\\wrong.bin", self.bytecode)])
+        result = self.run_cli("--normalize-paths", "--recover-names", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertEqual(archive.namelist(), ["META-INF/versions/17/Example.class"])
 
 
 if __name__ == "__main__":
