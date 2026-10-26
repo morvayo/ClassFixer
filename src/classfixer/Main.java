@@ -44,6 +44,7 @@ public final class Main {
             System.out.println("--strip-debug -> remove source and local-variable debug attributes");
             System.out.println("--strip-generics -> remove generic signature metadata");
             System.out.println("--trim-trailing -> remove data following the complete class structure");
+            System.out.println("--normalize-paths -> normalize archive separators and reject traversal paths");
 
             System.out.println("--args-file file.txt -> read one argument per line as utf-8");
             return;
@@ -52,6 +53,7 @@ public final class Main {
         boolean recoverNames = false;
         boolean dryRun = false;
         boolean trimTrailing = false;
+        boolean normalizePaths = false;
         Set<String> removedAttributes = new HashSet<>();
         boolean positional = false;
         for (String argument : args) {
@@ -67,6 +69,8 @@ public final class Main {
                 removedAttributes.add("Signature");
             } else if (!positional && argument.equals("--trim-trailing")) {
                 trimTrailing = true;
+            } else if (!positional && argument.equals("--normalize-paths")) {
+                normalizePaths = true;
             } else if (!positional && argument.startsWith("--")) {
                 System.err.println("unknown option: " + argument);
                 System.exit(2);
@@ -84,7 +88,7 @@ public final class Main {
                 throw new IOException("input is not a regular file");
             }
             Path output = (paths.size() == 2 ? Path.of(paths.get(1)) : defaultOutput(input)).toAbsolutePath().normalize();
-            int repaired = fix(input, output, recoverNames, dryRun, removedAttributes, trimTrailing);
+            int repaired = fix(input, output, recoverNames, dryRun, removedAttributes, trimTrailing, normalizePaths);
             System.out.println("repaired entries -> " + repaired);
             System.out.println("output -> " + (dryRun ? "not written (dry-run)" : output));
         } catch (IOException | IllegalArgumentException | SecurityException exception) {
@@ -101,7 +105,7 @@ public final class Main {
         return input.resolveSibling(name + "-fixed.jar");
     }
 
-    static int fix(Path input, Path output, boolean recoverNames, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing) throws IOException {
+    static int fix(Path input, Path output, boolean recoverNames, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing, boolean normalizePaths) throws IOException {
         if (!dryRun && (input.equals(output) || Files.exists(output, LinkOption.NOFOLLOW_LINKS))) {
             throw new IOException("output already exists or matches input");
         }
@@ -123,14 +127,14 @@ public final class Main {
                     throw new IOException("archive size exceeds limit");
                 }
                 declaredTotal += size;
-                String name = repairedName(archive, entry, recoverNames);
+                String name = repairedName(archive, entry, recoverNames, normalizePaths);
                 if (!uniqueNames.add(name)) {
                     throw new IOException("duplicate output entry: " + name);
                 }
                 if (!name.equals(entry.getName())) {
                     repaired++;
                 }
-                signed |= isSignature(entry.getName());
+                signed |= isSignature(name);
                 entries.add(entry);
                 names.add(name);
             }
@@ -253,8 +257,8 @@ public final class Main {
         }
     }
 
-    private static String repairedName(ZipFile archive, ZipEntry entry, boolean recoverNames) throws IOException {
-        String name = entry.getName();
+    private static String repairedName(ZipFile archive, ZipEntry entry, boolean recoverNames, boolean normalizePaths) throws IOException {
+        String name = normalizePaths ? normalizePath(entry.getName()) : entry.getName();
         int end = name.length();
         while (end > 0 && name.charAt(end - 1) == '/') {
             end--;
@@ -296,5 +300,25 @@ public final class Main {
         String file = upper.substring(9);
         return !file.contains("/") && (file.endsWith(".SF") || file.endsWith(".RSA")
                 || file.endsWith(".DSA") || file.endsWith(".EC") || file.startsWith("SIG-"));
+    }
+
+    private static String normalizePath(String name) throws IOException {
+        String slashes = name.replace('\\', '/');
+        if (slashes.startsWith("/") || slashes.indexOf(':') >= 0 || slashes.indexOf('\0') >= 0) {
+            throw new IOException("unsafe archive path: " + printable(name));
+        }
+        List<String> segments = new ArrayList<>();
+        for (String segment : slashes.split("/")) {
+            if (segment.equals("..")) {
+                throw new IOException("unsafe archive path: " + printable(name));
+            }
+            if (!segment.isEmpty() && !segment.equals(".")) {
+                segments.add(segment);
+            }
+        }
+        if (segments.isEmpty()) {
+            throw new IOException("empty normalized archive path");
+        }
+        return String.join("/", segments) + (slashes.endsWith("/") ? "/" : "");
     }
 }

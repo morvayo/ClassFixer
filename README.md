@@ -25,6 +25,8 @@ The default output is `input-fixed.jar`. Existing output files are never replace
 
 `--trim-trailing` removes bytes after the final class attribute, which can cause JVM `Extra bytes at the end of class file` errors. The complete class structure must be readable; truncated fields, methods or attributes still fail. Existing metadata is retained unless a stripping flag is also supplied.
 
+`--normalize-paths` converts backslashes to slashes and removes redundant separators and `.` segments from class and resource paths. Absolute paths, parent traversal, NUL and colon-containing names are rejected. Collisions after normalization fail before output is written. Normalization is opt-in because a literal backslash can be a valid resource-name character.
+
 `java -jar build/ClassFixer.jar --args-file arguments.txt` reads UTF-8 arguments with one argument per line, without quotes. Paths are relative to the current working directory. This also supports paths that the Windows Java 17 launcher cannot pass directly through the active system code page. The argument-file path itself must be representable by that launcher.
 
 Archive contents are streamed with limits of 256 MiB per entry, 1 GiB total and 100,000 entries. Entry contents, compression methods, timestamps and comments are retained; ZIP extra fields and filesystem permission bits are not retained.
