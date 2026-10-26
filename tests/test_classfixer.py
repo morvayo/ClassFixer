@@ -1,4 +1,5 @@
 import pathlib
+import json
 import random
 import struct
 import subprocess
@@ -589,6 +590,49 @@ class ClassFixerTests(unittest.TestCase):
         result = self.run_cli("--strip-debug", self.input, self.output)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.output.read_bytes(), b"existing")
+
+    def test_json_dry_run_report(self):
+        self.write_archive([("Example.class/", self.bytecode)])
+        result = self.run_cli("--json", "--dry-run", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["mode"], "dry-run")
+        self.assertIsNone(report["output"])
+        self.assertEqual(report["checked_entries"], 1)
+        self.assertEqual(report["renamed_entries"], 1)
+        self.assertEqual(report["renames"], [{"from": "Example.class/", "to": "Example.class"}])
+        self.assertFalse(self.output.exists())
+        self.assertEqual(result.stderr, "")
+
+    def test_json_escapes_unicode_quotes_and_controls(self):
+        name = 'quote"\n\u015f.class/'
+        self.write_archive([(name, self.bytecode)])
+        result = self.run_cli("--json", "--dry-run", self.input)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.isascii())
+        report = json.loads(result.stdout)
+        self.assertEqual(report["renames"][0]["from"], name)
+        self.assertEqual(report["renames"][0]["to"], name[:-1])
+
+    def test_json_operational_error_has_no_partial_report(self):
+        self.input.write_bytes(b"invalid zip")
+        result = self.run_cli("--json", self.input, self.output)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(json.loads(result.stderr)["status"], "error")
+        self.assertFalse(self.output.exists())
+
+    def test_json_standalone_report(self):
+        self.input = self.folder / "Example.class"
+        self.output = self.folder / "fixed.class"
+        self.input.write_bytes(self.bytecode)
+        result = self.run_cli("--json", "--strip-debug", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["declared_class"], "Example")
+        self.assertEqual(report["rewritten_classes"], 1)
+        self.assertEqual(report["output"], str(self.output))
 
 
 if __name__ == "__main__":

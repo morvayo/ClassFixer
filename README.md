@@ -32,6 +32,8 @@ Standalone `.class` files are supported with the same metadata and trailing-data
 
 `--unsigned` explicitly creates an unsigned output so signed input can be repaired. Root signing files under `META-INF` and signing digests in the manifest are removed. Other manifest attributes, service resources and the input archive are retained. Removed entries still undergo CRC and size validation. The output no longer carries the original publisher's signature; re-sign it separately if required.
 
+`--json` emits one JSON success report on stdout with entry counts, class rewrites, removed signing files and rename mappings. Dry-run reports use a null output path. Operational failures emit one JSON error on stderr and exit 1, with no partial success report. Usage errors exit 2 with plain-text diagnostics. JSON strings are ASCII-escaped so reports retain Unicode paths across console code pages.
+
 `java -jar build/ClassFixer.jar --args-file arguments.txt` reads UTF-8 arguments with one argument per line, without quotes. Paths are relative to the current working directory. This also supports paths that the Windows Java 17 launcher cannot pass directly through the active system code page. The argument-file path itself must be representable by that launcher.
 
 Archive contents are streamed with limits of 256 MiB per entry, 1 GiB total and 100,000 entries. Entry contents, compression methods, timestamps and comments are retained; ZIP extra fields and filesystem permission bits are not retained.
