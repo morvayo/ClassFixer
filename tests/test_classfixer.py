@@ -550,6 +550,46 @@ class ClassFixerTests(unittest.TestCase):
         self.assertIn("removed signing files -> 1", result.stdout)
         self.assertFalse(self.output.exists())
 
+    def test_standalone_class_repair(self):
+        self.input = self.folder / "damaged.class"
+        self.output = self.folder / "Example.class"
+        self.input.write_bytes(self.bytecode + b"trailing junk")
+        original = self.input.read_bytes()
+        result = self.run_cli("--trim-trailing", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.output.read_bytes(), self.bytecode)
+        self.assertIn("declared class -> Example", result.stdout)
+        self.assertEqual(self.input.read_bytes(), original)
+        execution = subprocess.run(
+            ["java", "-verify", "-cp", str(self.folder), "Example"], capture_output=True, text=True, timeout=20
+        )
+        self.assertEqual(execution.returncode, 0, execution.stderr)
+
+    def test_standalone_default_output_and_dry_run(self):
+        self.input = self.folder / "Example.class"
+        self.input.write_bytes(self.bytecode)
+        result = self.run_cli("--dry-run", "--strip-debug", self.input)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        target = self.folder / "Example-fixed.class"
+        self.assertFalse(target.exists())
+        self.assertEqual(self.run_cli(self.input).returncode, 0)
+        self.assertEqual(target.read_bytes(), self.bytecode)
+
+    def test_standalone_rejects_invalid_data_and_archive_flags(self):
+        self.input = self.folder / "Example.class"
+        self.input.write_bytes(b"invalid class")
+        self.assert_rejected(self.fix(), "invalid class magic")
+        self.input.write_bytes(self.bytecode)
+        self.assert_rejected(self.run_cli("--unsigned", self.input, self.output), "archive-only options")
+
+    def test_standalone_preserves_existing_output(self):
+        self.input = self.folder / "Example.class"
+        self.input.write_bytes(self.bytecode)
+        self.output.write_bytes(b"existing")
+        result = self.run_cli("--strip-debug", self.input, self.output)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.output.read_bytes(), b"existing")
+
 
 if __name__ == "__main__":
     unittest.main()
