@@ -261,6 +261,44 @@ class ClassFixerTests(unittest.TestCase):
     def test_unknown_options_rejected(self):
         self.assertEqual(self.run_cli("--unknown", self.input).returncode, 2)
 
+    def test_dry_run_previews_without_writing(self):
+        self.write_archive([("Example.class/", self.bytecode)])
+        original = self.input.read_bytes()
+        result = self.run_cli("--dry-run", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rename -> Example.class/ -> Example.class", result.stdout)
+        self.assertIn("not written (dry-run)", result.stdout)
+        self.assertEqual(self.input.read_bytes(), original)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.folder.glob(".classfixer-*")), [])
+
+    def test_dry_run_with_existing_output(self):
+        self.write_archive([])
+        self.output.write_bytes(b"existing")
+        result = self.run_cli("--dry-run", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.output.read_bytes(), b"existing")
+
+    def test_dry_run_validates_crc(self):
+        payload = b"unique stored content"
+        self.write_archive([("asset.txt", payload)], compression=zipfile.ZIP_STORED)
+        self.input.write_bytes(self.input.read_bytes().replace(payload, b"X" + payload[1:], 1))
+        self.assert_rejected(self.run_cli("--dry-run", self.input, self.output), "invalid entry size or crc")
+
+    def test_dry_run_combines_with_recovery(self):
+        self.write_archive([("wrong.bin", self.packaged)])
+        result = self.run_cli("--dry-run", "--recover-names", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rename -> wrong.bin -> demo/Packaged.class", result.stdout)
+        self.assertFalse(self.output.exists())
+
+    def test_dry_run_escapes_control_characters(self):
+        self.write_archive([("line\nbreak.class/", self.bytecode)])
+        result = self.run_cli("--dry-run", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("line\\u000abreak.class/", result.stdout)
+        self.assertNotIn("line\nbreak", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

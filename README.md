@@ -9,11 +9,14 @@ python build.py --test
 java -jar build/ClassFixer.jar input.jar
 java -jar build/ClassFixer.jar input.jar output.jar
 java -jar build/ClassFixer.jar --recover-names input.jar
+java -jar build/ClassFixer.jar --dry-run --recover-names input.jar
 ```
 
 The default output is `input-fixed.jar`. Existing output files are never replaced. Name collisions, CRC failures and oversized archives are rejected. Renaming entries in signed JARs is rejected because it would invalidate their signatures.
 
 `--recover-names` reads `this_class` from class-file headers and restores the declared package and class name, even when an entry has a different extension. Version prefixes in multi-release JARs are retained. Unsafe class names and malformed constant pools are rejected. Parsing is limited to 16 MiB per class; this checks headers, not JVM bytecode validity.
+
+`--dry-run` prints planned renames and validates the complete archive, including CRCs, without creating an output or temporary file. It can inspect a repair even if the chosen output path already exists. Signature checks and size limits still apply.
 
 Archive contents are streamed with limits of 256 MiB per entry, 1 GiB total and 100,000 entries. Entry contents, compression methods, timestamps and comments are retained; ZIP extra fields and filesystem permission bits are not retained.
 
