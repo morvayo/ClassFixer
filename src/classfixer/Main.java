@@ -2,6 +2,7 @@ package classfixer;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -36,24 +37,45 @@ public final class Main {
             }
         }
         if (args.length == 1 && args[0].equals("--help")) {
-            System.out.println("usage: java -jar ClassFixer.jar input.jar [output.jar]");
+            System.out.println("usage: java -jar ClassFixer.jar [--recover-names] input.jar [output.jar]");
             System.out.println("repairs class entries hidden by trailing slashes; existing outputs are not replaced");
+            System.out.println("--recover-names -> recover paths from class headers, including disguised resource entries");
+            System.out.println("--dry-run -> validate the archive and preview renames without writing output");
+
             System.out.println("--args-file file.txt -> read one argument per line as utf-8");
             return;
         }
-        if (args.length < 1 || args.length > 2) {
-            System.err.println("usage: java -jar ClassFixer.jar input.jar [output.jar]");
+        List<String> paths = new ArrayList<>();
+        boolean recoverNames = false;
+        boolean dryRun = false;
+        boolean positional = false;
+        for (String argument : args) {
+            if (!positional && argument.equals("--")) {
+                positional = true;
+            } else if (!positional && argument.equals("--recover-names")) {
+                recoverNames = true;
+            } else if (!positional && argument.equals("--dry-run")) {
+                dryRun = true;
+            } else if (!positional && argument.startsWith("--")) {
+                System.err.println("unknown option: " + argument);
+                System.exit(2);
+            } else {
+                paths.add(argument);
+            }
+        }
+        if (paths.isEmpty() || paths.size() > 2) {
+            System.err.println("usage: java -jar ClassFixer.jar [--recover-names] input.jar [output.jar]");
             System.exit(2);
         }
         try {
-            Path input = Path.of(args[0]).toAbsolutePath().normalize();
+            Path input = Path.of(paths.get(0)).toAbsolutePath().normalize();
             if (!Files.isRegularFile(input)) {
                 throw new IOException("input is not a regular file");
             }
-            Path output = (args.length == 2 ? Path.of(args[1]) : defaultOutput(input)).toAbsolutePath().normalize();
-            int repaired = fix(input, output);
+            Path output = (paths.size() == 2 ? Path.of(paths.get(1)) : defaultOutput(input)).toAbsolutePath().normalize();
+            int repaired = fix(input, output, recoverNames, dryRun);
             System.out.println("repaired entries -> " + repaired);
-            System.out.println("output -> " + output);
+            System.out.println("output -> " + (dryRun ? "not written (dry-run)" : output));
         } catch (IOException | IllegalArgumentException | SecurityException exception) {
             System.err.println("repair -> failed: " + exception.getMessage());
             System.exit(1);
@@ -68,8 +90,8 @@ public final class Main {
         return input.resolveSibling(name + "-fixed.jar");
     }
 
-    static int fix(Path input, Path output) throws IOException {
-        if (input.equals(output) || Files.exists(output, LinkOption.NOFOLLOW_LINKS)) {
+    static int fix(Path input, Path output, boolean recoverNames, boolean dryRun) throws IOException {
+        if (!dryRun && (input.equals(output) || Files.exists(output, LinkOption.NOFOLLOW_LINKS))) {
             throw new IOException("output already exists or matches input");
         }
         try (ZipFile archive = new ZipFile(input.toFile())) {
@@ -90,7 +112,7 @@ public final class Main {
                     throw new IOException("archive size exceeds limit");
                 }
                 declaredTotal += size;
-                String name = repairedName(archive, entry);
+                String name = repairedName(archive, entry, recoverNames);
                 if (!uniqueNames.add(name)) {
                     throw new IOException("duplicate output entry: " + name);
                 }
@@ -104,9 +126,10 @@ public final class Main {
             if (signed && repaired > 0) {
                 throw new IOException("repair would invalidate jar signatures");
             }
-            Path temporary = Files.createTempFile(output.getParent(), ".classfixer-", ".tmp");
+            Path temporary = dryRun ? null : Files.createTempFile(output.getParent(), ".classfixer-", ".tmp");
             try {
-                try (ZipOutputStream destination = new ZipOutputStream(Files.newOutputStream(temporary))) {
+                try (ZipOutputStream destination = new ZipOutputStream(
+                        dryRun ? OutputStream.nullOutputStream() : Files.newOutputStream(temporary))) {
                     if (archive.getComment() != null) {
                         destination.setComment(archive.getComment());
                     }
@@ -115,6 +138,9 @@ public final class Main {
                     for (int index = 0; index < entries.size(); index++) {
                         ZipEntry source = entries.get(index);
                         ZipEntry target = new ZipEntry(names.get(index));
+                        if (dryRun && !source.getName().equals(target.getName())) {
+                            System.out.println("rename -> " + printable(source.getName()) + " -> " + printable(target.getName()));
+                        }
                         target.setMethod(source.getMethod());
                         if (source.getTime() >= 0) {
                             target.setTime(source.getTime());
@@ -145,26 +171,64 @@ public final class Main {
                         destination.closeEntry();
                     }
                 }
-                Files.move(temporary, output);
+                if (!dryRun) {
+                    Files.move(temporary, output);
+                }
             } finally {
-                Files.deleteIfExists(temporary);
+                if (temporary != null) {
+                    Files.deleteIfExists(temporary);
+                }
             }
+            System.out.println("checked entries -> " + entries.size());
             return repaired;
         }
     }
 
-    private static String repairedName(ZipFile archive, ZipEntry entry) throws IOException {
+    private static String printable(String value) {
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (Character.isISOControl(character)) {
+                result.append(String.format(Locale.ROOT, "\\u%04x", (int) character));
+            } else {
+                result.append(character);
+            }
+        }
+        return result.toString();
+    }
+
+    private static String repairedName(ZipFile archive, ZipEntry entry, boolean recoverNames) throws IOException {
         String name = entry.getName();
         int end = name.length();
         while (end > 0 && name.charAt(end - 1) == '/') {
             end--;
         }
         String candidate = name.substring(0, end);
-        if (end == name.length() || !candidate.endsWith(".class")) {
+        if (!recoverNames && (end == name.length() || !candidate.endsWith(".class"))) {
             return name;
         }
         try (InputStream data = archive.getInputStream(entry)) {
-            return Arrays.equals(data.readNBytes(4), CLASS_MAGIC) ? candidate : name;
+            if (!Arrays.equals(data.readNBytes(4), CLASS_MAGIC)) {
+                return name;
+            }
+        }
+        if (!recoverNames) {
+            return candidate;
+        }
+        try (InputStream data = archive.getInputStream(entry)) {
+            String recovered = new ClassFile(ClassFile.read(data)).name() + ".class";
+            if (name.startsWith("META-INF/versions/")) {
+                int separator = name.indexOf('/', 18);
+                if (separator < 0) {
+                    throw new IOException("invalid multi-release class path: " + name);
+                }
+                String version = name.substring(18, separator);
+                if (!version.matches("[1-9][0-9]*") || version.length() > 9 || Long.parseLong(version) < 9) {
+                    throw new IOException("invalid multi-release version: " + version);
+                }
+                return name.substring(0, separator + 1) + recovered;
+            }
+            return recovered;
         }
     }
 

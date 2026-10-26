@@ -24,6 +24,19 @@ class ClassFixerTests(unittest.TestCase):
         )
         subprocess.run(["javac", "--release", "17", str(source)], check=True, capture_output=True)
         cls.bytecode = (cls.fixture / "Example.class").read_bytes()
+        packaged = cls.fixture / "Packaged.java"
+        packaged.write_text(
+            'package demo; public class Packaged { '
+            'static final long LONG = 123456789012345L; static final double DOUBLE = 1.234; '
+            'public static void main(String[] args) { '
+            'Runnable action = () -> System.out.println("packaged " + LONG + DOUBLE); action.run(); } }',
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["javac", "--release", "17", "-g", "-d", str(cls.fixture), str(packaged)],
+            check=True, capture_output=True,
+        )
+        cls.packaged = (cls.fixture / "demo" / "Packaged.class").read_bytes()
 
     @classmethod
     def tearDownClass(cls):
@@ -197,6 +210,97 @@ class ClassFixerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage:", result.stdout)
         self.assertEqual(result.stderr, "")
+
+    def test_recover_declared_package_from_disguised_entry(self):
+        self.write_archive([("hidden/data.bin", self.packaged), ("asset.txt", b"asset")])
+        result = self.run_cli("--recover-names", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertEqual(archive.namelist(), ["demo/Packaged.class", "asset.txt"])
+            self.assertEqual(archive.read("demo/Packaged.class"), self.packaged)
+        execution = subprocess.run(
+            ["java", "-cp", str(self.output), "demo.Packaged"], capture_output=True, text=True, timeout=20
+        )
+        self.assertEqual(execution.returncode, 0, execution.stderr)
+        self.assertIn("packaged", execution.stdout)
+
+    def test_recover_multi_release_paths(self):
+        self.write_archive([
+            ("wrong.class", self.bytecode),
+            ("META-INF/versions/17/wrong.class/", self.bytecode),
+        ])
+        result = self.run_cli("--recover-names", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertEqual(archive.namelist(), ["Example.class", "META-INF/versions/17/Example.class"])
+
+    def test_recover_rejects_invalid_multi_release_version(self):
+        self.write_archive([("META-INF/versions/8/wrong.class", self.bytecode)])
+        self.assert_rejected(self.run_cli("--recover-names", self.input, self.output), "multi-release version")
+
+    def test_recovery_detects_collisions(self):
+        self.write_archive([("first.bin", self.bytecode), ("second.bin", self.bytecode)])
+        self.assert_rejected(self.run_cli("--recover-names", self.input, self.output), "duplicate output entry")
+
+    def test_recovery_rejects_unsafe_class_names(self):
+        invalid = self.bytecode.replace(b"Example", b"Exa.ple")
+        self.write_archive([("wrong.class", invalid)])
+        self.assert_rejected(self.run_cli("--recover-names", self.input, self.output), "unsafe class name")
+
+    def test_recovery_rejects_invalid_and_truncated_constant_pools(self):
+        invalid = bytearray(self.bytecode)
+        invalid[10] = 2
+        for payload in (self.bytecode[:4], self.bytecode[:20], bytes(invalid)):
+            with self.subTest(size=len(payload)):
+                self.write_archive([("wrong.class", payload)])
+                self.assert_rejected(self.run_cli("--recover-names", self.input, self.output), "repair -> failed")
+
+    def test_recovery_is_explicit(self):
+        self.write_archive([("wrong.class", self.bytecode)])
+        self.assertEqual(self.fix().returncode, 0)
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertEqual(archive.namelist(), ["wrong.class"])
+
+    def test_unknown_options_rejected(self):
+        self.assertEqual(self.run_cli("--unknown", self.input).returncode, 2)
+
+    def test_dry_run_previews_without_writing(self):
+        self.write_archive([("Example.class/", self.bytecode)])
+        original = self.input.read_bytes()
+        result = self.run_cli("--dry-run", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rename -> Example.class/ -> Example.class", result.stdout)
+        self.assertIn("not written (dry-run)", result.stdout)
+        self.assertEqual(self.input.read_bytes(), original)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.folder.glob(".classfixer-*")), [])
+
+    def test_dry_run_with_existing_output(self):
+        self.write_archive([])
+        self.output.write_bytes(b"existing")
+        result = self.run_cli("--dry-run", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.output.read_bytes(), b"existing")
+
+    def test_dry_run_validates_crc(self):
+        payload = b"unique stored content"
+        self.write_archive([("asset.txt", payload)], compression=zipfile.ZIP_STORED)
+        self.input.write_bytes(self.input.read_bytes().replace(payload, b"X" + payload[1:], 1))
+        self.assert_rejected(self.run_cli("--dry-run", self.input, self.output), "invalid entry size or crc")
+
+    def test_dry_run_combines_with_recovery(self):
+        self.write_archive([("wrong.bin", self.packaged)])
+        result = self.run_cli("--dry-run", "--recover-names", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rename -> wrong.bin -> demo/Packaged.class", result.stdout)
+        self.assertFalse(self.output.exists())
+
+    def test_dry_run_escapes_control_characters(self):
+        self.write_archive([("line\nbreak.class/", self.bytecode)])
+        result = self.run_cli("--dry-run", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("line\\u000abreak.class/", result.stdout)
+        self.assertNotIn("line\nbreak", result.stdout)
 
     def test_argument_file_missing_and_oversized(self):
         arguments = self.folder / "arguments.txt"
