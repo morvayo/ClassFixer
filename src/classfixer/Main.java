@@ -1,6 +1,8 @@
 package classfixer;
 
 import java.io.IOException;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
@@ -12,6 +14,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.jar.Attributes;
+import java.util.jar.Manifest;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -45,6 +49,7 @@ public final class Main {
             System.out.println("--strip-generics -> remove generic signature metadata");
             System.out.println("--trim-trailing -> remove data following the complete class structure");
             System.out.println("--normalize-paths -> normalize archive separators and reject traversal paths");
+            System.out.println("--unsigned -> remove jar signing files and manifest digests in the output");
 
             System.out.println("--args-file file.txt -> read one argument per line as utf-8");
             return;
@@ -54,6 +59,7 @@ public final class Main {
         boolean dryRun = false;
         boolean trimTrailing = false;
         boolean normalizePaths = false;
+        boolean unsigned = false;
         Set<String> removedAttributes = new HashSet<>();
         boolean positional = false;
         for (String argument : args) {
@@ -71,6 +77,8 @@ public final class Main {
                 trimTrailing = true;
             } else if (!positional && argument.equals("--normalize-paths")) {
                 normalizePaths = true;
+            } else if (!positional && argument.equals("--unsigned")) {
+                unsigned = true;
             } else if (!positional && argument.startsWith("--")) {
                 System.err.println("unknown option: " + argument);
                 System.exit(2);
@@ -88,7 +96,7 @@ public final class Main {
                 throw new IOException("input is not a regular file");
             }
             Path output = (paths.size() == 2 ? Path.of(paths.get(1)) : defaultOutput(input)).toAbsolutePath().normalize();
-            int repaired = fix(input, output, recoverNames, dryRun, removedAttributes, trimTrailing, normalizePaths);
+            int repaired = fix(input, output, recoverNames, dryRun, removedAttributes, trimTrailing, normalizePaths, unsigned);
             System.out.println("repaired entries -> " + repaired);
             System.out.println("output -> " + (dryRun ? "not written (dry-run)" : output));
         } catch (IOException | IllegalArgumentException | SecurityException exception) {
@@ -105,7 +113,7 @@ public final class Main {
         return input.resolveSibling(name + "-fixed.jar");
     }
 
-    static int fix(Path input, Path output, boolean recoverNames, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing, boolean normalizePaths) throws IOException {
+    static int fix(Path input, Path output, boolean recoverNames, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing, boolean normalizePaths, boolean unsigned) throws IOException {
         if (!dryRun && (input.equals(output) || Files.exists(output, LinkOption.NOFOLLOW_LINKS))) {
             throw new IOException("output already exists or matches input");
         }
@@ -138,31 +146,44 @@ public final class Main {
                 entries.add(entry);
                 names.add(name);
             }
-            if (signed && repaired > 0) {
+            if (signed && repaired > 0 && !unsigned) {
                 throw new IOException("repair would invalidate jar signatures");
             }
             Path temporary = dryRun ? null : Files.createTempFile(output.getParent(), ".classfixer-", ".tmp");
             int rewritten = 0;
+            int removedSignatures = 0;
             try {
                 try (ZipOutputStream destination = new ZipOutputStream(
                         dryRun ? OutputStream.nullOutputStream() : Files.newOutputStream(temporary))) {
                     if (archive.getComment() != null) {
                         destination.setComment(archive.getComment());
                     }
-                    byte[] buffer = new byte[8192];
                     long total = 0;
                     for (int index = 0; index < entries.size(); index++) {
                         ZipEntry source = entries.get(index);
                         ZipEntry target = new ZipEntry(names.get(index));
+                        if (unsigned && isSignature(target.getName())) {
+                            total += copyEntry(archive, source, OutputStream.nullOutputStream(), MAX_TOTAL_SIZE - total);
+                            removedSignatures++;
+                            continue;
+                        }
                         if (dryRun && !source.getName().equals(target.getName())) {
                             System.out.println("rename -> " + printable(source.getName()) + " -> " + printable(target.getName()));
                         }
                         byte[] transformed = null;
                         int originalLength = 0;
-                        if ((!removedAttributes.isEmpty() || trimTrailing) && isClass(archive, source)) {
+                        boolean manifest = unsigned && target.getName().equalsIgnoreCase("META-INF/MANIFEST.MF");
+                        if (manifest || ((!removedAttributes.isEmpty() || trimTrailing) && isClass(archive, source))) {
                             byte[] original;
                             try (InputStream data = archive.getInputStream(source)) {
-                                original = ClassFile.read(data);
+                                if (manifest) {
+                                    original = data.readNBytes(16 * 1024 * 1024 + 1);
+                                    if (original.length > 16 * 1024 * 1024) {
+                                        throw new IOException("manifest exceeds 16 mib parsing limit");
+                                    }
+                                } else {
+                                    original = ClassFile.read(data);
+                                }
                             }
                             CRC32 originalCrc = new CRC32();
                             originalCrc.update(original);
@@ -170,12 +191,15 @@ public final class Main {
                                 throw new IOException("invalid entry size or crc: " + source.getName());
                             }
                             originalLength = original.length;
-                            transformed = new ClassFile(original).rewrite(removedAttributes, trimTrailing);
+                            transformed = manifest ? unsignedManifest(original)
+                                    : new ClassFile(original).rewrite(removedAttributes, trimTrailing);
                             if (!Arrays.equals(original, transformed)) {
-                                if (signed) {
+                                if (signed && !unsigned) {
                                     throw new IOException("repair would invalidate jar signatures");
                                 }
-                                rewritten++;
+                                if (!manifest) {
+                                    rewritten++;
+                                }
                             }
                         }
                         target.setMethod(source.getMethod());
@@ -204,23 +228,7 @@ public final class Main {
                             destination.closeEntry();
                             continue;
                         }
-                        long count = 0;
-                        CRC32 crc = new CRC32();
-                        try (InputStream data = archive.getInputStream(source)) {
-                            int length;
-                            while ((length = data.read(buffer)) != -1) {
-                                if (length > MAX_ENTRY_SIZE - count || length > MAX_TOTAL_SIZE - total) {
-                                    throw new IOException("expanded archive exceeds limit");
-                                }
-                                count += length;
-                                total += length;
-                                crc.update(buffer, 0, length);
-                                destination.write(buffer, 0, length);
-                            }
-                        }
-                        if (count != source.getSize() || crc.getValue() != source.getCrc()) {
-                            throw new IOException("invalid entry size or crc: " + source.getName());
-                        }
+                        total += copyEntry(archive, source, destination, MAX_TOTAL_SIZE - total);
                         destination.closeEntry();
                     }
                 }
@@ -234,6 +242,7 @@ public final class Main {
             }
             System.out.println("checked entries -> " + entries.size());
             System.out.println("rewritten classes -> " + rewritten);
+            System.out.println("removed signing files -> " + removedSignatures);
             return repaired;
         }
     }
@@ -249,6 +258,50 @@ public final class Main {
             }
         }
         return result.toString();
+    }
+
+    private static long copyEntry(ZipFile archive, ZipEntry source, OutputStream output, long remaining) throws IOException {
+        byte[] buffer = new byte[8192];
+        long count = 0;
+        CRC32 crc = new CRC32();
+        try (InputStream data = archive.getInputStream(source)) {
+            int length;
+            while ((length = data.read(buffer)) != -1) {
+                if (length > MAX_ENTRY_SIZE - count || length > remaining - count) {
+                    throw new IOException("expanded archive exceeds limit");
+                }
+                count += length;
+                crc.update(buffer, 0, length);
+                output.write(buffer, 0, length);
+            }
+        }
+        if (count != source.getSize() || crc.getValue() != source.getCrc()) {
+            throw new IOException("invalid entry size or crc: " + printable(source.getName()));
+        }
+        return count;
+    }
+
+    private static byte[] unsignedManifest(byte[] bytes) throws IOException {
+        Manifest manifest = new Manifest(new ByteArrayInputStream(bytes));
+        boolean changed = removeDigests(manifest.getMainAttributes());
+        for (Attributes attributes : manifest.getEntries().values()) {
+            changed |= removeDigests(attributes);
+        }
+        if (!changed) {
+            return bytes;
+        }
+        manifest.getEntries().entrySet().removeIf(entry -> entry.getValue().isEmpty());
+        ByteArrayOutputStream result = new ByteArrayOutputStream();
+        manifest.write(result);
+        return result.toByteArray();
+    }
+
+    private static boolean removeDigests(Attributes attributes) {
+        return attributes.entrySet().removeIf(entry -> {
+            String name = entry.getKey().toString().toUpperCase(Locale.ROOT);
+            return name.endsWith("-DIGEST") || name.contains("-DIGEST-")
+                    || name.equals("SIGNATURE-VERSION") || name.equals("MAGIC");
+        });
     }
 
     private static boolean isClass(ZipFile archive, ZipEntry entry) throws IOException {

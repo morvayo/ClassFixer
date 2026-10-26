@@ -500,6 +500,56 @@ class ClassFixerTests(unittest.TestCase):
         with zipfile.ZipFile(self.output) as archive:
             self.assertEqual(archive.namelist(), ["META-INF/versions/17/Example.class"])
 
+    def test_unsigned_repair_cleans_signing_metadata(self):
+        manifest = (
+            b"Manifest-Version: 1.0\r\nMain-Class: Example\r\nMulti-Release: true\r\n"
+            b"SHA-256-Digest-Manifest: invalid\r\nSignature-Version: 1.0\r\n\r\n"
+            b"Name: Example.class/\r\nSHA-256-Digest: invalid\r\nX-Custom: keep\r\n\r\n"
+            b"Name: asset.txt\r\nSHA-256-Digest: invalid\r\n\r\n"
+        )
+        signatures = ["META-INF/TEST.SF", "META-INF/TEST.RSA", "META-INF/TEST.DSA", "META-INF/TEST.EC", "META-INF/SIG-CUSTOM"]
+        entries = [("META-INF/MANIFEST.MF", manifest), ("Example.class/", self.bytecode)]
+        entries += [(name, b"signature") for name in signatures]
+        entries += [("META-INF/services/test.SF", b"service resource"), ("asset.txt", b"asset")]
+        self.write_archive(entries, compression=zipfile.ZIP_STORED)
+        original = self.input.read_bytes()
+        result = self.run_cli("--unsigned", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("removed signing files -> 5", result.stdout)
+        with zipfile.ZipFile(self.output) as archive:
+            for name in signatures:
+                self.assertNotIn(name, archive.namelist())
+            cleaned = archive.read("META-INF/MANIFEST.MF")
+            self.assertNotIn(b"Digest", cleaned)
+            self.assertNotIn(b"Signature-Version", cleaned)
+            self.assertIn(b"Main-Class: Example", cleaned)
+            self.assertIn(b"Multi-Release: true", cleaned)
+            self.assertIn(b"X-Custom: keep", cleaned)
+            self.assertEqual(archive.read("META-INF/services/test.SF"), b"service resource")
+        execution = subprocess.run(["java", "-jar", str(self.output)], capture_output=True, text=True, timeout=20)
+        self.assertEqual(execution.returncode, 0, execution.stderr)
+        self.assertEqual(self.input.read_bytes(), original)
+
+    def test_unsigned_validates_discarded_signing_entry_crc(self):
+        payload = b"unique stored signing data"
+        self.write_archive([("META-INF/TEST.SF", payload)], compression=zipfile.ZIP_STORED)
+        self.input.write_bytes(self.input.read_bytes().replace(payload, b"X" + payload[1:], 1))
+        self.assert_rejected(self.run_cli("--unsigned", self.input, self.output), "invalid entry size or crc")
+
+    def test_unsigned_preserves_unsigned_manifest_bytes(self):
+        manifest = b"Manifest-Version: 1.0\nMain-Class: Example\n\n"
+        self.write_archive([("META-INF/MANIFEST.MF", manifest), ("Example.class", self.bytecode)])
+        self.assertEqual(self.run_cli("--unsigned", self.input, self.output).returncode, 0)
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertEqual(archive.read("META-INF/MANIFEST.MF"), manifest)
+
+    def test_unsigned_dry_run_combines_with_class_repair(self):
+        self.write_archive([("Example.class/", self.bytecode), ("META-INF/TEST.SF", b"signature")])
+        result = self.run_cli("--unsigned", "--dry-run", "--strip-debug", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("removed signing files -> 1", result.stdout)
+        self.assertFalse(self.output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
