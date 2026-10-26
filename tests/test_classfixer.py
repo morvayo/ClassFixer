@@ -440,6 +440,34 @@ class ClassFixerTests(unittest.TestCase):
         self.assertNotIn("Signature:", inspection.stdout)
         self.assertNotIn("LineNumberTable:", inspection.stdout)
 
+    def test_trailing_data_repair_restores_jvm_loading(self):
+        self.write_archive([("Example.class", self.bytecode + b"trailing junk")])
+        before = subprocess.run(
+            ["java", "-cp", str(self.input), "Example"], capture_output=True, text=True, timeout=20
+        )
+        self.assertNotEqual(before.returncode, 0)
+        self.assertIn("Extra bytes", before.stderr)
+        result = self.run_cli("--trim-trailing", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertEqual(archive.read("Example.class"), self.bytecode)
+        after = subprocess.run(
+            ["java", "-verify", "-cp", str(self.output), "Example"],
+            capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(after.returncode, 0, after.stderr)
+
+    def test_trailing_data_preserved_by_default(self):
+        payload = self.bytecode + b"trailing junk"
+        self.write_archive([("Example.class", payload)])
+        self.assertEqual(self.fix().returncode, 0)
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertEqual(archive.read("Example.class"), payload)
+
+    def test_trimming_rejects_truncated_class(self):
+        self.write_archive([("Example.class", self.bytecode[:-1])])
+        self.assert_rejected(self.run_cli("--trim-trailing", self.input, self.output), "truncated class attribute")
+
 
 if __name__ == "__main__":
     unittest.main()

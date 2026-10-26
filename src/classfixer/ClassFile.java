@@ -72,7 +72,7 @@ final class ClassFile {
         return name;
     }
 
-    byte[] rewrite(Set<String> removedAttributes) throws IOException {
+    byte[] rewrite(Set<String> removedAttributes, boolean trimTrailing) throws IOException {
         DataInputStream input = new DataInputStream(new ByteArrayInputStream(bytes, bodyOffset, bytes.length - bodyOffset));
         ByteArrayOutputStream buffer = new ByteArrayOutputStream(bytes.length);
         DataOutputStream output = new DataOutputStream(buffer);
@@ -84,7 +84,7 @@ final class ClassFile {
         members(input, output, false, removedAttributes);
         members(input, output, true, removedAttributes);
         attributes(input, output, false, removedAttributes);
-        if (input.available() != 0) {
+        if (input.available() != 0 && !trimTrailing) {
             throw new IOException("trailing bytes after class attributes");
         }
         return buffer.toByteArray();

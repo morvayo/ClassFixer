@@ -43,6 +43,7 @@ public final class Main {
             System.out.println("--dry-run -> validate the archive and preview renames without writing output");
             System.out.println("--strip-debug -> remove source and local-variable debug attributes");
             System.out.println("--strip-generics -> remove generic signature metadata");
+            System.out.println("--trim-trailing -> remove data following the complete class structure");
 
             System.out.println("--args-file file.txt -> read one argument per line as utf-8");
             return;
@@ -50,6 +51,7 @@ public final class Main {
         List<String> paths = new ArrayList<>();
         boolean recoverNames = false;
         boolean dryRun = false;
+        boolean trimTrailing = false;
         Set<String> removedAttributes = new HashSet<>();
         boolean positional = false;
         for (String argument : args) {
@@ -63,6 +65,8 @@ public final class Main {
                 removedAttributes.addAll(ClassFile.DEBUG);
             } else if (!positional && argument.equals("--strip-generics")) {
                 removedAttributes.add("Signature");
+            } else if (!positional && argument.equals("--trim-trailing")) {
+                trimTrailing = true;
             } else if (!positional && argument.startsWith("--")) {
                 System.err.println("unknown option: " + argument);
                 System.exit(2);
@@ -80,7 +84,7 @@ public final class Main {
                 throw new IOException("input is not a regular file");
             }
             Path output = (paths.size() == 2 ? Path.of(paths.get(1)) : defaultOutput(input)).toAbsolutePath().normalize();
-            int repaired = fix(input, output, recoverNames, dryRun, removedAttributes);
+            int repaired = fix(input, output, recoverNames, dryRun, removedAttributes, trimTrailing);
             System.out.println("repaired entries -> " + repaired);
             System.out.println("output -> " + (dryRun ? "not written (dry-run)" : output));
         } catch (IOException | IllegalArgumentException | SecurityException exception) {
@@ -97,7 +101,7 @@ public final class Main {
         return input.resolveSibling(name + "-fixed.jar");
     }
 
-    static int fix(Path input, Path output, boolean recoverNames, boolean dryRun, Set<String> removedAttributes) throws IOException {
+    static int fix(Path input, Path output, boolean recoverNames, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing) throws IOException {
         if (!dryRun && (input.equals(output) || Files.exists(output, LinkOption.NOFOLLOW_LINKS))) {
             throw new IOException("output already exists or matches input");
         }
@@ -151,7 +155,7 @@ public final class Main {
                         }
                         byte[] transformed = null;
                         int originalLength = 0;
-                        if (!removedAttributes.isEmpty() && isClass(archive, source)) {
+                        if ((!removedAttributes.isEmpty() || trimTrailing) && isClass(archive, source)) {
                             byte[] original;
                             try (InputStream data = archive.getInputStream(source)) {
                                 original = ClassFile.read(data);
@@ -162,7 +166,7 @@ public final class Main {
                                 throw new IOException("invalid entry size or crc: " + source.getName());
                             }
                             originalLength = original.length;
-                            transformed = new ClassFile(original).rewrite(removedAttributes);
+                            transformed = new ClassFile(original).rewrite(removedAttributes, trimTrailing);
                             if (!Arrays.equals(original, transformed)) {
                                 if (signed) {
                                     throw new IOException("repair would invalidate jar signatures");
