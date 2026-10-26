@@ -21,6 +21,8 @@ The default output is `input-fixed.jar`. Existing output files are never replace
 
 `--strip-debug` removes `SourceFile`, `SourceDebugExtension`, `LineNumberTable`, `LocalVariableTable` and `LocalVariableTypeTable` attributes, including those nested in method `Code` attributes. This can remove malformed debug metadata that trips decompilers. It preserves instructions, exception tables, stack maps, annotations and unknown attributes. Debugging source locations and local variable names are lost. Structural truncation is rejected rather than guessed. Signed JARs are rejected if class bytes would change.
 
+`--strip-generics` removes `Signature` attributes from classes, fields and methods. It can repair malformed generic metadata that breaks reflection or decompilers, but removes generic type information exposed through reflection. Runtime descriptors and instructions are retained. This flag does not remove JAR signing files.
+
 `java -jar build/ClassFixer.jar --args-file arguments.txt` reads UTF-8 arguments with one argument per line, without quotes. Paths are relative to the current working directory. This also supports paths that the Windows Java 17 launcher cannot pass directly through the active system code page. The argument-file path itself must be representable by that launcher.
 
 Archive contents are streamed with limits of 256 MiB per entry, 1 GiB total and 100,000 entries. Entry contents, compression methods, timestamps and comments are retained; ZIP extra fields and filesystem permission bits are not retained.

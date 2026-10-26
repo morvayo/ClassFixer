@@ -10,7 +10,7 @@ import java.util.Set;
 
 final class ClassFile {
     private static final int MAX_SIZE = 16 * 1024 * 1024;
-    private static final Set<String> DEBUG = Set.of("SourceFile", "SourceDebugExtension",
+    static final Set<String> DEBUG = Set.of("SourceFile", "SourceDebugExtension",
             "LineNumberTable", "LocalVariableTable", "LocalVariableTypeTable");
     private final String name;
     private final byte[] bytes;
@@ -72,7 +72,7 @@ final class ClassFile {
         return name;
     }
 
-    byte[] stripDebug() throws IOException {
+    byte[] rewrite(Set<String> removedAttributes) throws IOException {
         DataInputStream input = new DataInputStream(new ByteArrayInputStream(bytes, bodyOffset, bytes.length - bodyOffset));
         ByteArrayOutputStream buffer = new ByteArrayOutputStream(bytes.length);
         DataOutputStream output = new DataOutputStream(buffer);
@@ -81,25 +81,25 @@ final class ClassFile {
         int interfaces = input.readUnsignedShort();
         output.writeShort(interfaces);
         copy(input, output, interfaces * 2);
-        members(input, output, false);
-        members(input, output, true);
-        attributes(input, output, false);
+        members(input, output, false, removedAttributes);
+        members(input, output, true, removedAttributes);
+        attributes(input, output, false, removedAttributes);
         if (input.available() != 0) {
             throw new IOException("trailing bytes after class attributes");
         }
         return buffer.toByteArray();
     }
 
-    private void members(DataInputStream input, DataOutputStream output, boolean methods) throws IOException {
+    private void members(DataInputStream input, DataOutputStream output, boolean methods, Set<String> removedAttributes) throws IOException {
         int count = input.readUnsignedShort();
         output.writeShort(count);
         for (int index = 0; index < count; index++) {
             copy(input, output, 6);
-            attributes(input, output, methods);
+            attributes(input, output, methods, removedAttributes);
         }
     }
 
-    private void attributes(DataInputStream input, DataOutputStream output, boolean methods) throws IOException {
+    private void attributes(DataInputStream input, DataOutputStream output, boolean methods, Set<String> removedAttributes) throws IOException {
         int count = input.readUnsignedShort();
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream retained = new DataOutputStream(buffer);
@@ -115,11 +115,11 @@ final class ClassFile {
             }
             byte[] payload = input.readNBytes((int) length);
             String attribute = strings[reference];
-            if (DEBUG.contains(attribute)) {
+            if (removedAttributes.contains(attribute)) {
                 continue;
             }
             if (methods && attribute.equals("Code")) {
-                payload = stripCodeDebug(payload);
+                payload = rewriteCode(payload, removedAttributes);
             }
             retained.writeShort(reference);
             retained.writeInt(payload.length);
@@ -130,7 +130,7 @@ final class ClassFile {
         buffer.writeTo(output);
     }
 
-    private byte[] stripCodeDebug(byte[] payload) throws IOException {
+    private byte[] rewriteCode(byte[] payload, Set<String> removedAttributes) throws IOException {
         DataInputStream input = new DataInputStream(new ByteArrayInputStream(payload));
         ByteArrayOutputStream buffer = new ByteArrayOutputStream(payload.length);
         DataOutputStream output = new DataOutputStream(buffer);
@@ -144,7 +144,7 @@ final class ClassFile {
         int exceptions = input.readUnsignedShort();
         output.writeShort(exceptions);
         copy(input, output, exceptions * 8);
-        attributes(input, output, false);
+        attributes(input, output, false, removedAttributes);
         if (input.available() != 0) {
             throw new IOException("trailing bytes in code attribute");
         }
