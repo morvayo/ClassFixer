@@ -50,6 +50,7 @@ public final class Main {
             System.out.println("--trim-trailing -> remove data following the complete class structure");
             System.out.println("--normalize-paths -> normalize archive separators and reject traversal paths");
             System.out.println("--unsigned -> remove jar signing files and manifest digests in the output");
+            System.out.println("--json -> write a machine-readable repair report");
 
             System.out.println("--args-file file.txt -> read one argument per line as utf-8");
             return;
@@ -60,6 +61,7 @@ public final class Main {
         boolean trimTrailing = false;
         boolean normalizePaths = false;
         boolean unsigned = false;
+        boolean json = false;
         Set<String> removedAttributes = new HashSet<>();
         boolean positional = false;
         for (String argument : args) {
@@ -79,6 +81,8 @@ public final class Main {
                 normalizePaths = true;
             } else if (!positional && argument.equals("--unsigned")) {
                 unsigned = true;
+            } else if (!positional && argument.equals("--json")) {
+                json = true;
             } else if (!positional && argument.startsWith("--")) {
                 System.err.println("unknown option: " + argument);
                 System.exit(2);
@@ -101,20 +105,35 @@ public final class Main {
                         || input.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".class");
             }
             Path output = (paths.size() == 2 ? Path.of(paths.get(1)) : defaultOutput(input, standalone)).toAbsolutePath().normalize();
-            int repaired;
+            Report report;
             if (standalone) {
                 if (normalizePaths || unsigned) {
                     throw new IllegalArgumentException("archive-only options require jar input");
                 }
-                fixClass(input, output, dryRun, removedAttributes, trimTrailing);
-                repaired = 0;
+                report = fixClass(input, output, dryRun, removedAttributes, trimTrailing);
             } else {
-                repaired = fix(input, output, recoverNames, dryRun, removedAttributes, trimTrailing, normalizePaths, unsigned);
+                report = fix(input, output, recoverNames, dryRun, removedAttributes, trimTrailing, normalizePaths, unsigned);
             }
-            System.out.println("repaired entries -> " + repaired);
-            System.out.println("output -> " + (dryRun ? "not written (dry-run)" : output));
+            if (json) {
+                System.out.println(jsonReport(report, input, output, dryRun));
+            } else {
+                if (dryRun) {
+                    for (Rename rename : report.renames()) {
+                        System.out.println("rename -> " + printable(rename.from()) + " -> " + printable(rename.to()));
+                    }
+                }
+                if (report.declaredClass() != null) {
+                    System.out.println("declared class -> " + printable(report.declaredClass()));
+                }
+                System.out.println("checked entries -> " + report.checkedEntries());
+                System.out.println("rewritten classes -> " + report.rewrittenClasses());
+                System.out.println("removed signing files -> " + report.removedSigningFiles());
+                System.out.println("repaired entries -> " + report.renamedEntries());
+                System.out.println("output -> " + (dryRun ? "not written (dry-run)" : output));
+            }
         } catch (IOException | IllegalArgumentException | SecurityException exception) {
-            System.err.println("repair -> failed: " + exception.getMessage());
+            System.err.println(json ? "{\"status\":\"error\",\"message\":" + quote(exception.getMessage()) + "}"
+                    : "repair -> failed: " + exception.getMessage());
             System.exit(1);
         }
     }
@@ -128,7 +147,7 @@ public final class Main {
         return input.resolveSibling(name + "-fixed" + extension);
     }
 
-    private static void fixClass(Path input, Path output, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing) throws IOException {
+    private static Report fixClass(Path input, Path output, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing) throws IOException {
         if (!dryRun && (input.equals(output) || Files.exists(output, LinkOption.NOFOLLOW_LINKS))) {
             throw new IOException("output already exists or matches input");
         }
@@ -148,18 +167,17 @@ public final class Main {
                 Files.deleteIfExists(temporary);
             }
         }
-        System.out.println("declared class -> " + printable(classFile.name()));
-        System.out.println("checked entries -> 1");
-        System.out.println("rewritten classes -> " + (Arrays.equals(original, transformed) ? 0 : 1));
+        return new Report(1, 0, Arrays.equals(original, transformed) ? 0 : 1, 0, classFile.name(), List.of());
     }
 
-    static int fix(Path input, Path output, boolean recoverNames, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing, boolean normalizePaths, boolean unsigned) throws IOException {
+    private static Report fix(Path input, Path output, boolean recoverNames, boolean dryRun, Set<String> removedAttributes, boolean trimTrailing, boolean normalizePaths, boolean unsigned) throws IOException {
         if (!dryRun && (input.equals(output) || Files.exists(output, LinkOption.NOFOLLOW_LINKS))) {
             throw new IOException("output already exists or matches input");
         }
         try (ZipFile archive = new ZipFile(input.toFile())) {
             List<ZipEntry> entries = new ArrayList<>();
             List<String> names = new ArrayList<>();
+            List<Rename> renames = new ArrayList<>();
             Set<String> uniqueNames = new HashSet<>();
             boolean signed = false;
             int repaired = 0;
@@ -181,6 +199,7 @@ public final class Main {
                 }
                 if (!name.equals(entry.getName())) {
                     repaired++;
+                    renames.add(new Rename(entry.getName(), name));
                 }
                 signed |= isSignature(name);
                 entries.add(entry);
@@ -206,9 +225,6 @@ public final class Main {
                             total += copyEntry(archive, source, OutputStream.nullOutputStream(), MAX_TOTAL_SIZE - total);
                             removedSignatures++;
                             continue;
-                        }
-                        if (dryRun && !source.getName().equals(target.getName())) {
-                            System.out.println("rename -> " + printable(source.getName()) + " -> " + printable(target.getName()));
                         }
                         byte[] transformed = null;
                         int originalLength = 0;
@@ -280,11 +296,53 @@ public final class Main {
                     Files.deleteIfExists(temporary);
                 }
             }
-            System.out.println("checked entries -> " + entries.size());
-            System.out.println("rewritten classes -> " + rewritten);
-            System.out.println("removed signing files -> " + removedSignatures);
-            return repaired;
+            return new Report(entries.size(), repaired, rewritten, removedSignatures, null, renames);
         }
+    }
+
+    private record Rename(String from, String to) {}
+
+    private record Report(int checkedEntries, int renamedEntries, int rewrittenClasses, int removedSigningFiles,
+                          String declaredClass, List<Rename> renames) {}
+
+    private static String jsonReport(Report report, Path input, Path output, boolean dryRun) {
+        StringBuilder json = new StringBuilder("{\"status\":\"ok\",\"mode\":");
+        json.append(quote(dryRun ? "dry-run" : "repair"));
+        json.append(",\"input\":").append(quote(input.toString()));
+        json.append(",\"output\":").append(dryRun ? "null" : quote(output.toString()));
+        json.append(",\"checked_entries\":").append(report.checkedEntries());
+        json.append(",\"renamed_entries\":").append(report.renamedEntries());
+        json.append(",\"rewritten_classes\":").append(report.rewrittenClasses());
+        json.append(",\"removed_signing_files\":").append(report.removedSigningFiles());
+        json.append(",\"declared_class\":").append(quote(report.declaredClass()));
+        json.append(",\"renames\":[");
+        for (int index = 0; index < report.renames().size(); index++) {
+            if (index > 0) {
+                json.append(',');
+            }
+            Rename rename = report.renames().get(index);
+            json.append("{\"from\":").append(quote(rename.from()));
+            json.append(",\"to\":").append(quote(rename.to())).append('}');
+        }
+        return json.append("]}").toString();
+    }
+
+    private static String quote(String value) {
+        if (value == null) {
+            return "null";
+        }
+        StringBuilder result = new StringBuilder("\"");
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (character == '"' || character == '\\') {
+                result.append('\\').append(character);
+            } else if (character < 32 || character >= 127) {
+                result.append(String.format(Locale.ROOT, "\\u%04x", (int) character));
+            } else {
+                result.append(character);
+            }
+        }
+        return result.append('"').toString();
     }
 
     private static String printable(String value) {
