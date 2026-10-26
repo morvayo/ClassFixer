@@ -41,6 +41,7 @@ public final class Main {
             System.out.println("repairs class entries hidden by trailing slashes; existing outputs are not replaced");
             System.out.println("--recover-names -> recover paths from class headers, including disguised resource entries");
             System.out.println("--dry-run -> validate the archive and preview renames without writing output");
+            System.out.println("--strip-debug -> remove source and local-variable debug attributes");
 
             System.out.println("--args-file file.txt -> read one argument per line as utf-8");
             return;
@@ -48,6 +49,7 @@ public final class Main {
         List<String> paths = new ArrayList<>();
         boolean recoverNames = false;
         boolean dryRun = false;
+        boolean stripDebug = false;
         boolean positional = false;
         for (String argument : args) {
             if (!positional && argument.equals("--")) {
@@ -56,6 +58,8 @@ public final class Main {
                 recoverNames = true;
             } else if (!positional && argument.equals("--dry-run")) {
                 dryRun = true;
+            } else if (!positional && argument.equals("--strip-debug")) {
+                stripDebug = true;
             } else if (!positional && argument.startsWith("--")) {
                 System.err.println("unknown option: " + argument);
                 System.exit(2);
@@ -73,7 +77,7 @@ public final class Main {
                 throw new IOException("input is not a regular file");
             }
             Path output = (paths.size() == 2 ? Path.of(paths.get(1)) : defaultOutput(input)).toAbsolutePath().normalize();
-            int repaired = fix(input, output, recoverNames, dryRun);
+            int repaired = fix(input, output, recoverNames, dryRun, stripDebug);
             System.out.println("repaired entries -> " + repaired);
             System.out.println("output -> " + (dryRun ? "not written (dry-run)" : output));
         } catch (IOException | IllegalArgumentException | SecurityException exception) {
@@ -90,7 +94,7 @@ public final class Main {
         return input.resolveSibling(name + "-fixed.jar");
     }
 
-    static int fix(Path input, Path output, boolean recoverNames, boolean dryRun) throws IOException {
+    static int fix(Path input, Path output, boolean recoverNames, boolean dryRun, boolean stripDebug) throws IOException {
         if (!dryRun && (input.equals(output) || Files.exists(output, LinkOption.NOFOLLOW_LINKS))) {
             throw new IOException("output already exists or matches input");
         }
@@ -127,6 +131,7 @@ public final class Main {
                 throw new IOException("repair would invalidate jar signatures");
             }
             Path temporary = dryRun ? null : Files.createTempFile(output.getParent(), ".classfixer-", ".tmp");
+            int rewritten = 0;
             try {
                 try (ZipOutputStream destination = new ZipOutputStream(
                         dryRun ? OutputStream.nullOutputStream() : Files.newOutputStream(temporary))) {
@@ -141,16 +146,53 @@ public final class Main {
                         if (dryRun && !source.getName().equals(target.getName())) {
                             System.out.println("rename -> " + printable(source.getName()) + " -> " + printable(target.getName()));
                         }
+                        byte[] transformed = null;
+                        int originalLength = 0;
+                        if (stripDebug && isClass(archive, source)) {
+                            byte[] original;
+                            try (InputStream data = archive.getInputStream(source)) {
+                                original = ClassFile.read(data);
+                            }
+                            CRC32 originalCrc = new CRC32();
+                            originalCrc.update(original);
+                            if (original.length != source.getSize() || originalCrc.getValue() != source.getCrc()) {
+                                throw new IOException("invalid entry size or crc: " + source.getName());
+                            }
+                            originalLength = original.length;
+                            transformed = new ClassFile(original).stripDebug();
+                            if (!Arrays.equals(original, transformed)) {
+                                if (signed) {
+                                    throw new IOException("repair would invalidate jar signatures");
+                                }
+                                rewritten++;
+                            }
+                        }
                         target.setMethod(source.getMethod());
                         if (source.getTime() >= 0) {
                             target.setTime(source.getTime());
                         }
                         target.setComment(source.getComment());
                         if (source.getMethod() == ZipEntry.STORED) {
-                            target.setSize(source.getSize());
-                            target.setCrc(source.getCrc());
+                            if (transformed == null) {
+                                target.setSize(source.getSize());
+                                target.setCrc(source.getCrc());
+                            } else {
+                                CRC32 transformedCrc = new CRC32();
+                                transformedCrc.update(transformed);
+                                target.setSize(transformed.length);
+                                target.setCrc(transformedCrc.getValue());
+                            }
                         }
                         destination.putNextEntry(target);
+                        if (transformed != null) {
+                            if (originalLength > MAX_TOTAL_SIZE - total) {
+                                throw new IOException("expanded archive exceeds limit");
+                            }
+                            total += originalLength;
+                            destination.write(transformed);
+                            destination.closeEntry();
+                            continue;
+                        }
                         long count = 0;
                         CRC32 crc = new CRC32();
                         try (InputStream data = archive.getInputStream(source)) {
@@ -180,6 +222,7 @@ public final class Main {
                 }
             }
             System.out.println("checked entries -> " + entries.size());
+            System.out.println("rewritten classes -> " + rewritten);
             return repaired;
         }
     }
@@ -195,6 +238,12 @@ public final class Main {
             }
         }
         return result.toString();
+    }
+
+    private static boolean isClass(ZipFile archive, ZipEntry entry) throws IOException {
+        try (InputStream data = archive.getInputStream(entry)) {
+            return Arrays.equals(data.readNBytes(4), CLASS_MAGIC);
+        }
     }
 
     private static String repairedName(ZipFile archive, ZipEntry entry, boolean recoverNames) throws IOException {
