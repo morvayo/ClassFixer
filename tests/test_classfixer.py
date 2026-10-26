@@ -14,7 +14,7 @@ class ClassFixerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not JAR.is_file():
-            raise RuntimeError("build/ClassFixer.jar is missing; run ./build.ps1 first")
+            raise RuntimeError("build/ClassFixer.jar is missing; run python build.py first")
         cls.workspace = tempfile.TemporaryDirectory(dir=ROOT / "build")
         cls.fixture = pathlib.Path(cls.workspace.name)
         source = cls.fixture / "Example.java"
