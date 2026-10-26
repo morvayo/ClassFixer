@@ -29,6 +29,8 @@ class ClassFixerTests(unittest.TestCase):
             'package demo; public class Packaged { '
             'static final long LONG = 123456789012345L; static final double DOUBLE = 1.234; '
             'public static void main(String[] args) { '
+            'java.util.List<String> values = java.util.List.of("fixture"); '
+            'if (values.isEmpty()) { throw new IllegalArgumentException(); } '
             'Runnable action = () -> System.out.println("packaged " + LONG + DOUBLE); action.run(); } }',
             encoding="utf-8",
         )
@@ -307,6 +309,72 @@ class ClassFixerTests(unittest.TestCase):
         self.assertEqual(self.run_cli("--args-file", arguments).returncode, 1)
         arguments.write_bytes(b"a" * (1024 * 1024 + 1))
         self.assertIn("exceeds 1 mib", self.run_cli("--args-file", arguments).stderr)
+
+    def test_debug_stripping_preserves_executable_bytecode(self):
+        for compression in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            with self.subTest(compression=compression):
+                target = self.folder / f"stripped-{compression}.jar"
+                self.write_archive([("demo/Packaged.class", self.packaged)], compression=compression)
+                result = self.run_cli("--strip-debug", self.input, target)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("rewritten classes -> 1", result.stdout)
+                inspection = subprocess.run(
+                    ["javap", "-v", "-classpath", str(target), "demo.Packaged"],
+                    capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(inspection.returncode, 0, inspection.stderr)
+                for attribute in ("SourceFile:", "LineNumberTable:", "LocalVariableTable:", "LocalVariableTypeTable:"):
+                    self.assertNotIn(attribute, inspection.stdout)
+                self.assertIn("StackMapTable:", inspection.stdout)
+                execution = subprocess.run(
+                    ["java", "-verify", "-cp", str(target), "demo.Packaged"],
+                    capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(execution.returncode, 0, execution.stderr)
+                self.assertIn("packaged", execution.stdout)
+
+    def test_debug_stripping_repairs_invalid_source_reference(self):
+        self.assertEqual(struct.unpack(">I", self.bytecode[-6:-2])[0], 2)
+        damaged = self.bytecode[:-2] + b"\x00\x00"
+        self.write_archive([("Example.class", damaged)])
+        before = subprocess.run(
+            ["java", "-cp", str(self.input), "Example"], capture_output=True, text=True, timeout=20
+        )
+        self.assertNotEqual(before.returncode, 0)
+        result = self.run_cli("--strip-debug", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = subprocess.run(
+            ["java", "-verify", "-cp", str(self.output), "Example"],
+            capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(after.returncode, 0, after.stderr)
+        self.assertEqual(after.stdout.strip(), "fixture -> ok")
+
+    def test_debug_stripping_rejects_signed_byte_changes(self):
+        self.write_archive([("Example.class", self.bytecode), ("META-INF/TEST.SF", b"signature")])
+        self.assert_rejected(self.run_cli("--strip-debug", self.input, self.output), "invalidate jar signatures")
+
+    def test_debug_stripping_rejects_truncated_class(self):
+        self.write_archive([("Example.class", self.bytecode[:-1])])
+        self.assert_rejected(self.run_cli("--strip-debug", self.input, self.output), "truncated class attribute")
+
+    def test_debug_stripping_is_idempotent(self):
+        self.write_archive([("Example.class/", self.bytecode)])
+        first = self.run_cli("--strip-debug", "--recover-names", self.input, self.output)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second_output = self.folder / "second.jar"
+        second = self.run_cli("--strip-debug", self.output, second_output)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("rewritten classes -> 0", second.stdout)
+        with zipfile.ZipFile(self.output) as first_zip, zipfile.ZipFile(second_output) as second_zip:
+            self.assertEqual(first_zip.read("Example.class"), second_zip.read("Example.class"))
+
+    def test_dry_run_debug_stripping(self):
+        self.write_archive([("Example.class", self.bytecode)])
+        result = self.run_cli("--dry-run", "--strip-debug", self.input, self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rewritten classes -> 1", result.stdout)
+        self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":

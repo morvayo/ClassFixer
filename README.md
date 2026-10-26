@@ -10,6 +10,7 @@ java -jar build/ClassFixer.jar input.jar
 java -jar build/ClassFixer.jar input.jar output.jar
 java -jar build/ClassFixer.jar --recover-names input.jar
 java -jar build/ClassFixer.jar --dry-run --recover-names input.jar
+java -jar build/ClassFixer.jar --strip-debug --recover-names input.jar
 ```
 
 The default output is `input-fixed.jar`. Existing output files are never replaced. Name collisions, CRC failures and oversized archives are rejected. Renaming entries in signed JARs is rejected because it would invalidate their signatures.
@@ -17,6 +18,8 @@ The default output is `input-fixed.jar`. Existing output files are never replace
 `--recover-names` reads `this_class` from class-file headers and restores the declared package and class name, even when an entry has a different extension. Version prefixes in multi-release JARs are retained. Unsafe class names and malformed constant pools are rejected. Parsing is limited to 16 MiB per class; this checks headers, not JVM bytecode validity.
 
 `--dry-run` prints planned renames and validates the complete archive, including CRCs, without creating an output or temporary file. It can inspect a repair even if the chosen output path already exists. Signature checks and size limits still apply.
+
+`--strip-debug` removes `SourceFile`, `SourceDebugExtension`, `LineNumberTable`, `LocalVariableTable` and `LocalVariableTypeTable` attributes, including those nested in method `Code` attributes. This can remove malformed debug metadata that trips decompilers. It preserves instructions, exception tables, stack maps, annotations and unknown attributes. Debugging source locations and local variable names are lost. Structural truncation is rejected rather than guessed. Signed JARs are rejected if class bytes would change.
 
 `java -jar build/ClassFixer.jar --args-file arguments.txt` reads UTF-8 arguments with one argument per line, without quotes. Paths are relative to the current working directory. This also supports paths that the Windows Java 17 launcher cannot pass directly through the active system code page. The argument-file path itself must be representable by that launcher.
 
