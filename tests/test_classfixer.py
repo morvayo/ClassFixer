@@ -1,4 +1,5 @@
 import pathlib
+import random
 import struct
 import subprocess
 import tempfile
@@ -375,6 +376,23 @@ class ClassFixerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("rewritten classes -> 1", result.stdout)
         self.assertFalse(self.output.exists())
+
+    def test_class_mutations_fail_without_partial_output_or_stack_traces(self):
+        generator = random.Random(1947)
+        for index in range(40):
+            payload = bytearray(self.packaged)
+            if index % 2:
+                payload = payload[:generator.randrange(4, len(payload))]
+            else:
+                position = generator.randrange(4, len(payload))
+                payload[position] ^= 0xff
+            self.write_archive([("wrong.class", payload)])
+            result = self.run_cli("--dry-run", "--strip-debug", "--recover-names", self.input, self.output)
+            with self.subTest(index=index):
+                self.assertIn(result.returncode, (0, 1), result.stderr)
+                self.assertNotIn("Exception in thread", result.stderr)
+                self.assertFalse(self.output.exists())
+                self.assertEqual(list(self.folder.glob(".classfixer-*")), [])
 
 
 if __name__ == "__main__":
